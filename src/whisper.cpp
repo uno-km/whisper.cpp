@@ -3815,6 +3815,31 @@ struct whisper_context * whisper_init_with_params_no_state(struct whisper_model_
         params.dtw_token_timestamps = false;
     }
 
+    if (params.flash_attn && params.use_gpu) {
+        // Query GPU devices: if Adreno 6xx series (32KB LDS) is detected, Flash Attention
+        // cannot fit tiling buffers in hardware shared memory, causing driver compiler crash.
+        // Gracefully fall back to standard attention (-nfa) to guarantee crash-free execution.
+        for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+            ggml_backend_dev_t dev_cur = ggml_backend_dev_get(i);
+            enum ggml_backend_dev_type dev_type = ggml_backend_dev_type(dev_cur);
+            if (dev_type == GGML_BACKEND_DEVICE_TYPE_GPU || dev_type == GGML_BACKEND_DEVICE_TYPE_IGPU) {
+                const char * d_name = ggml_backend_dev_name(dev_cur);
+                const char * d_desc = ggml_backend_dev_description(dev_cur);
+                std::string desc_str = d_desc ? d_desc : "";
+                std::string name_str = d_name ? d_name : "";
+                if (desc_str.find("Adreno (TM) 6") != std::string::npos ||
+                    name_str.find("Adreno (TM) 6") != std::string::npos ||
+                    desc_str.find("Adreno 6") != std::string::npos ||
+                    name_str.find("Adreno 6") != std::string::npos) {
+                    WHISPER_LOG_WARN("%s: Adreno 6xx GPU detected (%s) - Flash Attention requires >32KB LDS which causes driver compiler crash. Gracefully falling back to standard attention (-nfa).\n",
+                                     __func__, d_desc ? d_desc : d_name);
+                    params.flash_attn = false;
+                    break;
+                }
+            }
+        }
+    }
+
     WHISPER_LOG_INFO("%s: use gpu    = %d\n", __func__, params.use_gpu);
     WHISPER_LOG_INFO("%s: flash attn = %d\n", __func__, params.flash_attn);
     WHISPER_LOG_INFO("%s: gpu_device = %d\n", __func__, params.gpu_device);

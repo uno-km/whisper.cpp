@@ -1891,10 +1891,13 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
                                        align, disable_robustness, require_full_subgroups, required_subgroup_size);
     };
 
-    // FA scalar has two SPIR-V modules (MMQ vs non-MMQ); FA cm1 has one. K/V
-    // quant type is selected at runtime via the FaTypeK / FaTypeV spec constants.
+    // Flash Attention requires at least 48KB of workgroup shared memory for its tiling buffers.
+    // Devices with smaller shared memory limits (e.g. Qualcomm Adreno 650 with 32KB LDS)
+    // will fail to compile the SPIR-V module with VK_ERROR_UNKNOWN (-13).
+    const bool fa_shmem_supported = device->properties.limits.maxComputeSharedMemorySize >= 49152;
 
     for (auto &fa : device->pipeline_flash_attn_f32_f16) {
+        if (!fa_shmem_supported) continue;
         if (fa.first.path != FA_SCALAR) continue;
         const uint32_t Br = fa.first.Br;
         const uint32_t Bc = fa.first.Bc;
@@ -15170,6 +15173,13 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
             }
         case GGML_OP_FLASH_ATTN_EXT:
             {
+                // Devices with shared memory < 48KB (e.g. Qualcomm Adreno 650 with 32KB LDS)
+                // cannot accommodate Flash Attention tiling kernels and will crash the driver compiler
+                // with VK_ERROR_UNKNOWN (-13). Check limits and decline support.
+                if (device->properties.limits.maxComputeSharedMemorySize < 49152) {
+                    return false;
+                }
+
                 bool coopmat2 = device->coopmat2;
                 uint32_t HSK = op->src[1]->ne[0];
                 uint32_t HSV = op->src[2]->ne[0];
